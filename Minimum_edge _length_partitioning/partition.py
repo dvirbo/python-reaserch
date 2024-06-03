@@ -1,13 +1,8 @@
 import logging
-from shapely.geometry import (
-    Polygon,
-    LineString,
-    Point,
-    GeometryCollection,
-    MultiLineString,
-    MultiPolygon,
-)
 from shapely.ops import split, unary_union
+from shapely.geometry import Polygon, LineString, Point, GeometryCollection, MultiPolygon
+
+logger = logging.getLogger("polygon_partitioning")
 
 
 class RectilinearPolygon:
@@ -159,8 +154,6 @@ class RectilinearPolygon:
 
         Returns:
             list: List of Polygon objects resulting from the split operation.
-
-        Note: a list that contain more than one polygon is a GeometryCollection type - it can't be split using the 'split' function
         """
         if not lines:
             return [self.polygon]
@@ -170,10 +163,15 @@ class RectilinearPolygon:
             if isinstance(geom, Polygon):
                 for line in lines:
                     split_result = split(geom, line)
-                    if isinstance(split_result, GeometryCollection): # see the note above
-                        polygons.extend(split_geometry(split_result, []))
-                    elif isinstance(split_result, Polygon):
-                        polygons.append(split_result)
+                    if isinstance(split_result, GeometryCollection):
+                        for sub_geom in split_result.geoms:
+                            if isinstance(sub_geom, Polygon):
+                                polygons.append(sub_geom)
+                    elif isinstance(split_result, (Polygon, MultiPolygon)):
+                        if isinstance(split_result, MultiPolygon):
+                            polygons.extend([g for g in split_result.geoms])
+                        else:
+                            polygons.append(split_result)
             elif isinstance(geom, GeometryCollection):
                 for sub_geom in geom.geoms:
                     polygons.extend(split_geometry(sub_geom, lines))
@@ -182,7 +180,20 @@ class RectilinearPolygon:
         polygons = split_geometry(self.polygon, lines)
         return polygons
 
-    def find_candidate_points(self, constructed_lines: list[LineString]):
+    def find_candidate_points(self, constructed_lines: list[LineString]) -> list[Point]:
+        """
+        Find candidate points based on the constructed lines.
+
+        Args:
+            constructed_lines (list[LineString]): A list of constructed lines.
+
+        Returns:
+            list[Point]: A list of candidate points.
+
+        Raises:
+            None
+
+        """
         if len(constructed_lines) == 1:
             return [
                 Point(constructed_lines[0].coords[0]),
@@ -193,6 +204,7 @@ class RectilinearPolygon:
             line2 = constructed_lines[1]
             common_point = line1.intersection(line2)
             if common_point.is_empty:
+                # logger.warning("No common point found between the two lines.")
                 return []
             else:
                 return [common_point]
@@ -209,9 +221,7 @@ class RectilinearPolygon:
         """
         return poly.area == poly.minimum_rotated_rectangle.area
 
-    def is_partitioned_into_rectangles(
-        self, partitions: list[LineString]
-    ) -> bool:  
+    def is_partitioned_into_rectangles(self, partitions: list[LineString]) -> bool:
         """
         Checks if the polygon is partitioned into rectangles.
 
@@ -249,17 +259,27 @@ class RectilinearPolygon:
 
         return self.best_partition
 
-    def recursive_partition(  # need to add logging here
-        self, candidate_points, partitionList: list[LineString]
-    ):
-        current_length = sum(line.length for line in partitionList)
-        if self.is_partitioned_into_rectangles(partitionList):
+    def recursive_partition(self, candidate_points, partition_list: list[LineString]):
+        """
+        Recursively partitions the given candidate points and updates the best partition.
+
+        Args:
+            candidate_points (list): The list of candidate points to consider for partitioning.
+            partitionList (list): The current partition list.
+
+        Returns:
+            None (just update the best partition).
+        """
+        current_length = sum(line.length for line in partition_list)
+        if self.is_partitioned_into_rectangles(partition_list):
             if current_length < self.min_partition_length:
                 self.min_partition_length = current_length
-                self.best_partition = partitionList
+                self.best_partition = partition_list
+                logger.warning(f"New best partition found: {self.best_partition}")
             return
-        else:
-            if current_length >= self.min_partition_length:  # cut this branch
+        
+        elif current_length >= self.min_partition_length:  # cut this branch
+                logger.debug(f"Branch cut due to length: {current_length}")
                 return
 
         for candidate in candidate_points:
@@ -272,20 +292,36 @@ class RectilinearPolygon:
                 if new_lines is None:
                     continue
 
-                # new_polygons = self.split_polygon(new_lines)
                 new_candidate_points = self.find_candidate_points(new_lines)
-
                 self.recursive_partition(
-                    new_candidate_points, partitionList + new_lines
+                    new_candidate_points, partition_list + new_lines
                 )
 
 
 if __name__ == "__main__":
     # Create the polygon instance
-    polygon = Polygon([(2, 0), (6, 0), (6, 4), (8, 4), (8, 6), (0, 6), (0, 4), (2, 4)])
+    polygon1 = Polygon([(2, 0), (6, 0), (6, 4), (8, 4), (8, 6), (0, 6), (0, 4), (2, 4)])
+    polygon2 = Polygon(
+        [
+            (1, 5),
+            (1, 4),
+            (3, 4),
+            (3, 3),
+            (2, 3),
+            (2, 1),
+            (5, 1),
+            (5, 2),
+            (8, 2),
+            (8, 1),
+            (9, 1),
+            (9, 4),
+            (8, 4),
+            (8, 5),
+        ]
+    )
 
     # Create a RectilinearPolygon instance
-    rectilinear_polygon = RectilinearPolygon(polygon)
+    rectilinear_polygon = RectilinearPolygon(polygon1)
 
     # Get the partition result
     partition_result = rectilinear_polygon.partition()
