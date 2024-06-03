@@ -1,4 +1,12 @@
-from shapely.geometry import Polygon, LineString, Point, GeometryCollection, MultiLineString, MultiPolygon
+import logging
+from shapely.geometry import (
+    Polygon,
+    LineString,
+    Point,
+    GeometryCollection,
+    MultiLineString,
+    MultiPolygon,
+)
 from shapely.ops import split, unary_union
 
 
@@ -125,24 +133,24 @@ class RectilinearPolygon:
         edge2 = LineString([candidate, Point(matching.x, candidate.y)])
         edge3 = LineString([Point(candidate.x, matching.y), matching])
         edge4 = LineString([Point(matching.x, candidate.y), matching])
-        
+
         # Collect all edges
         all_edges = [edge1, edge2, edge3, edge4]
-        
+
         # Find the segments of each edge that are not part of the polygon boundary
         internal_edges = []
         for edge in all_edges:
             difference = edge.difference(self.polygon.boundary)
             if not difference.is_empty:
-                if difference.geom_type == 'MultiLineString':
+                if difference.geom_type == "MultiLineString":
                     for line in difference:
                         internal_edges.append(line)
                 else:
                     internal_edges.append(difference)
-        #return only the new internal edges that are not part of the polygon boundary
-        return internal_edges if internal_edges else None 
+        # return only the new internal edges that are not part of the polygon boundary
+        return internal_edges if internal_edges else None
 
-    def split_polygon(self, lines): # not working
+    def split_polygon(self, lines):  # not working
         """
         Splits the polygon using the given lines.
 
@@ -161,8 +169,10 @@ class RectilinearPolygon:
 
         if isinstance(split_result, GeometryCollection):
             return [geom for geom in split_result.geoms if isinstance(geom, Polygon)]
-        else:
+        elif isinstance(split_result, Polygon):
             return [split_result]
+        else:
+            return []
 
     def find_candidate_points(self, constructed_lines: list[LineString]):
         if len(constructed_lines) == 1:
@@ -180,28 +190,16 @@ class RectilinearPolygon:
                 return [common_point]
 
     def is_rectangle(self, poly: Polygon) -> bool:
-        coords = list(poly.exterior.coords[:-1])
-        if len(coords) != 4:  # A rectangle has exactly 4 points
-            return False
+        """
+        Check if a given polygon is a rectangle.
+        source: https://stackoverflow.com/questions/62467829/python-check-if-shapely-polygon-is-a-rectangle
+        Args:
+            poly (Polygon): The polygon to be checked.
 
-        def is_perpendicular(p1, p2, p3):
-            dx1, dy1 = p2[0] - p1[0], p2[1] - p1[1]
-            dx2, dy2 = p3[0] - p2[0], p3[1] - p2[1]
-            return dx1 * dx2 + dy1 * dy2 == 0
-
-        def distance_squared(p1, p2):
-            return (p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2
-
-        return (
-            is_perpendicular(coords[0], coords[1], coords[2])
-            and is_perpendicular(coords[1], coords[2], coords[3])
-            and is_perpendicular(coords[2], coords[3], coords[0])
-            and is_perpendicular(coords[3], coords[0], coords[1])
-            and distance_squared(coords[0], coords[1])
-            == distance_squared(coords[2], coords[3])
-            and distance_squared(coords[1], coords[2])
-            == distance_squared(coords[3], coords[0])
-        )
+        Returns:
+            bool: True if the polygon is a rectangle, False otherwise.
+        """
+        return poly.area == poly.minimum_rotated_rectangle.area
 
     def is_partitioned_into_rectangles(
         self, partitions: list[LineString]
@@ -231,22 +229,8 @@ class RectilinearPolygon:
         """
         if not partitions:
             return self.is_rectangle(self.polygon)
-
-        current_polygons = [self.polygon]
-
-        for partition in partitions:
-            new_polygons = []
-            for poly in current_polygons:
-                split_result = split(poly, partition)
-                if isinstance(split_result, GeometryCollection):
-                    for geom in split_result.geoms:
-                        if isinstance(geom, Polygon):
-                            new_polygons.append(geom)
-                else:
-                    new_polygons.append(split_result)
-            current_polygons = new_polygons
-
-        return all(self.is_rectangle(p) for p in current_polygons)
+        polygons = self.split_polygon(partitions)
+        return all(self.is_rectangle(poly) for poly in polygons)
 
     def partition(self):
         if not self.is_rectilinear():
@@ -257,14 +241,14 @@ class RectilinearPolygon:
 
         return self.best_partition
 
-    def recursive_partition( # need to add logging here
-        self, candidate_points, current_partition: list[LineString]
+    def recursive_partition(  # need to add logging here
+        self, candidate_points, partitionList: list[LineString]
     ):
-        current_length = sum(line.length for line in current_partition)
-        if self.is_partitioned_into_rectangles(current_partition):
+        current_length = sum(line.length for line in partitionList)
+        if self.is_partitioned_into_rectangles(partitionList):
             if current_length < self.min_partition_length:
                 self.min_partition_length = current_length
-                self.best_partition = current_partition
+                self.best_partition = partitionList
             return
         else:
             if current_length >= self.min_partition_length:  # cut this branch
@@ -280,12 +264,11 @@ class RectilinearPolygon:
                 if new_lines is None:
                     continue
 
-                new_polygons = self.split_polygon(new_lines)
-                new_candidate_points = [
-                    pt for polygon in new_polygons for pt in self.find_convex_points()
-                ]
+                # new_polygons = self.split_polygon(new_lines)
+                new_candidate_points = self.find_candidate_points(new_lines)
+
                 self.recursive_partition(
-                    new_candidate_points, current_partition + new_lines
+                    new_candidate_points, partitionList + new_lines
                 )
 
 
