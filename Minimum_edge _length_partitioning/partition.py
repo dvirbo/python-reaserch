@@ -150,7 +150,7 @@ class RectilinearPolygon:
         # return only the new internal edges that are not part of the polygon boundary
         return internal_edges if internal_edges else None
 
-    def split_polygon(self, lines):  # not working
+    def split_polygon(self, lines):
         """
         Splits the polygon using the given lines.
 
@@ -159,20 +159,28 @@ class RectilinearPolygon:
 
         Returns:
             list: List of Polygon objects resulting from the split operation.
+
+        Note: a list that contain more than one polygon is a GeometryCollection type - it can't be split using the 'split' function
         """
         if not lines:
             return [self.polygon]
 
-        split_result = self.polygon
-        for line in lines:
-            split_result = split(split_result, line)
+        def split_geometry(geom, lines):
+            polygons = []
+            if isinstance(geom, Polygon):
+                for line in lines:
+                    split_result = split(geom, line)
+                    if isinstance(split_result, GeometryCollection): # see the note above
+                        polygons.extend(split_geometry(split_result, []))
+                    elif isinstance(split_result, Polygon):
+                        polygons.append(split_result)
+            elif isinstance(geom, GeometryCollection):
+                for sub_geom in geom.geoms:
+                    polygons.extend(split_geometry(sub_geom, lines))
+            return polygons
 
-        if isinstance(split_result, GeometryCollection):
-            return [geom for geom in split_result.geoms if isinstance(geom, Polygon)]
-        elif isinstance(split_result, Polygon):
-            return [split_result]
-        else:
-            return []
+        polygons = split_geometry(self.polygon, lines)
+        return polygons
 
     def find_candidate_points(self, constructed_lines: list[LineString]):
         if len(constructed_lines) == 1:
@@ -203,7 +211,7 @@ class RectilinearPolygon:
 
     def is_partitioned_into_rectangles(
         self, partitions: list[LineString]
-    ) -> bool:  # works
+    ) -> bool:  
         """
         Checks if the polygon is partitioned into rectangles.
 
