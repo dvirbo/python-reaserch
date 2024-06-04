@@ -1,6 +1,13 @@
 import logging
 from shapely.ops import split, unary_union
-from shapely.geometry import Polygon, LineString, Point, GeometryCollection, MultiPolygon
+from shapely.geometry import (
+    Polygon,
+    LineString,
+    Point,
+    GeometryCollection,
+    MultiPolygon,
+    MultiPoint
+)
 
 logger = logging.getLogger("polygon_partitioning")
 
@@ -11,6 +18,8 @@ class RectilinearPolygon:
         self.constructed_lines = []
         self.min_partition_length = float("inf")
         self.best_partition = []
+        self.partial_figures = []
+        self.grid_points = []
 
     def is_rectilinear(self) -> bool:
         coords = list(self.polygon.exterior.coords)
@@ -55,38 +64,41 @@ class RectilinearPolygon:
 
         return convex_points
 
-    def get_grid_points(self):  # works
+    def get_grid_points(self):
         """
         Returns the grid points induced by the boundary of the polygon, including the polygon vertices.
         """
         # Get the polygon vertices
-        polygon_vertices = list(self.polygon.exterior.coords)
+        polygon_vertices = MultiPoint(self.polygon.exterior.coords)
 
         # Get the horizontal and vertical lines formed by extending the edges of the polygon
-        x_coords = set(coord[0] for coord in polygon_vertices)
-        y_coords = set(coord[1] for coord in polygon_vertices)
+        x_coords = set(coord[0] for coord in self.polygon.exterior.coords)
+        y_coords = set(coord[1] for coord in self.polygon.exterior.coords)
 
-        vertical_lines = [
-            LineString([(x, min(y_coords)), (x, max(y_coords))]) for x in x_coords
-        ]
-        horizontal_lines = [
-            LineString([(min(x_coords), y), (max(x_coords), y)]) for y in y_coords
-        ]
+        vertical_lines = [LineString([(x, min(y_coords)), (x, max(y_coords))]) for x in x_coords]
+        horizontal_lines = [LineString([(min(x_coords), y), (max(x_coords), y)]) for y in y_coords]
 
         # Find the intersection points of the horizontal and vertical lines
-        intersections = unary_union(vertical_lines + horizontal_lines).intersection(
-            self.polygon
-        )
-
-        # Convert the intersection points to a set of Point objects to remove duplicates
-        grid_points = set(Point(geom.coords[0]) for geom in intersections.geoms)
+        grid_points = set()
+        for v_line in vertical_lines:
+            for h_line in horizontal_lines:
+                intersection = v_line.intersection(h_line)
+                if intersection.is_empty:
+                    continue
+                elif isinstance(intersection, Point) and intersection.within(self.polygon):
+                    grid_points.add(intersection)
+                elif isinstance(intersection, MultiPoint):
+                    for point in intersection:
+                        if point.within(self.polygon):
+                            grid_points.add(point)
 
         # Add the polygon vertices to the grid points
-        grid_points.update(map(Point, polygon_vertices))
+        for point in polygon_vertices.geoms:
+            grid_points.add(point)
 
         return list(grid_points)
 
-    def find_matching_point(self, candidate: Point):  # works
+    def find_matching_point(self, candidate: Point):  # -> list[Point]:
         """
         Finds matching points on the grid inside the polygon and kitty-corner to the candidate point
         within a blocked rectangle inside the polygon.
@@ -98,9 +110,16 @@ class RectilinearPolygon:
             list: List of Points representing the matching points.
         """
         matching_points = []
-        grid_points = self.get_grid_points()
+        relevant_grid_points = []
+        """
+        Find the matching points on the grid that are not inside or on the partial_figures (that is a [Polygon]).
+        We want to find the matching points that not in other partial figures (to make a new partial figure)
+        """
+        for point in self.grid_points:
+            if not any(point.within(polygon) or point.touches(polygon) for polygon in self.partial_figures):
+                relevant_grid_points.append(point) 
 
-        for point in grid_points:
+        for point in relevant_grid_points:
             if point != candidate:  # Exclude candidate point
                 # Check if the point is kitty-corner to the candidate within a blocked rectangle
                 min_x = min(candidate.x, point.x)
@@ -125,12 +144,22 @@ class RectilinearPolygon:
     def find_blocked_rectangle(self, candidate: Point, matching: Point):
         # Create the four edges of the potential blocked rectangle
         edge1 = LineString([candidate, Point(candidate.x, matching.y)])
-        edge2 = LineString([candidate, Point(matching.x, candidate.y)])
-        edge3 = LineString([Point(candidate.x, matching.y), matching])
-        edge4 = LineString([Point(matching.x, candidate.y), matching])
+        edge2 = LineString([Point(candidate.x, matching.y), matching])
+        edge3 = LineString([matching, Point(matching.x, candidate.y)])
+        edge4 = LineString([Point(matching.x, candidate.y), candidate])
 
         # Collect all edges
         all_edges = [edge1, edge2, edge3, edge4]
+
+        # Convert each LineString to a list of coordinate tuples
+        coords_list = [list(edge.coords) for edge in all_edges]
+
+        # Concatenate the coordinate lists, removing duplicates
+        coords = list(dict.fromkeys(sum(coords_list, [])))
+
+        # Construct the partial polygon
+        polygon = Polygon(coords)
+        self.partial_figures.append(polygon)
 
         # Find the segments of each edge that are not part of the polygon boundary
         internal_edges = []
@@ -202,12 +231,12 @@ class RectilinearPolygon:
         elif len(constructed_lines) == 2:
             line1 = constructed_lines[0]
             line2 = constructed_lines[1]
-            common_point = line1.intersection(line2)
-            if common_point.is_empty:
-                # logger.warning("No common point found between the two lines.")
-                return []
-            else:
-                return [common_point]
+            # common_point = line1.intersection(line2)
+            # if common_point.is_empty:
+            #     # logger.warning("No common point found between the two lines.")
+            #     return []
+        else:
+            return None
 
     def is_rectangle(self, poly: Polygon) -> bool:
         """
@@ -255,6 +284,7 @@ class RectilinearPolygon:
             return None
 
         initial_convex_points = self.find_convex_points()
+        self.grid_points = self.get_grid_points()
         self.recursive_partition(initial_convex_points, [])
 
         return self.best_partition
@@ -265,22 +295,28 @@ class RectilinearPolygon:
 
         Args:
             candidate_points (list): The list of candidate points to consider for partitioning.
-            partitionList (list): The current partition list.
+            partition_list (list): The current partition list.
 
         Returns:
             None (just update the best partition).
         """
+        if not candidate_points:
+            # No more candidate points, return the best partition
+            logger.debug(f"No more candidate points, returning the best partition: {self.best_partition}")
+            return 
+
         current_length = sum(line.length for line in partition_list)
+
         if self.is_partitioned_into_rectangles(partition_list):
             if current_length < self.min_partition_length:
                 self.min_partition_length = current_length
                 self.best_partition = partition_list
                 logger.warning(f"New best partition found: {self.best_partition}")
             return
-        
-        elif current_length >= self.min_partition_length:  # cut this branch
-                logger.debug(f"Branch cut due to length: {current_length}")
-                return
+        elif current_length >= self.min_partition_length:
+            # Cut this branch
+            logger.debug(f"Branch cut due to length: {current_length}")
+            return
 
         for candidate in candidate_points:
             matching_points = self.find_matching_point(candidate)
@@ -293,10 +329,12 @@ class RectilinearPolygon:
                     continue
 
                 new_candidate_points = self.find_candidate_points(new_lines)
-                self.recursive_partition(
-                    new_candidate_points, partition_list + new_lines
-                )
-
+                
+                # Ensure new_candidate_points are actually new and valid
+                if new_candidate_points:
+                    self.recursive_partition(
+                        new_candidate_points, partition_list + new_lines
+                    )
 
 if __name__ == "__main__":
     # Create the polygon instance
@@ -321,7 +359,7 @@ if __name__ == "__main__":
     )
 
     # Create a RectilinearPolygon instance
-    rectilinear_polygon = RectilinearPolygon(polygon1)
+    rectilinear_polygon = RectilinearPolygon(polygon2)
 
     # Get the partition result
     partition_result = rectilinear_polygon.partition()
