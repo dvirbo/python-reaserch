@@ -1,5 +1,5 @@
 import logging
-from shapely.ops import split
+from shapely.ops import split, unary_union
 from shapely.geometry import (
     Polygon,
     LineString,
@@ -7,8 +7,8 @@ from shapely.geometry import (
     GeometryCollection,
     MultiPolygon,
     MultiPoint,
-    MultiLineString
 )
+
 
 logger = logging.getLogger("polygon_partitioning")
 
@@ -65,46 +65,56 @@ class RectilinearPolygon:
 
         return convex_points
 
+
+    def is_concave_vertex(self, i, coords):
+        # Calculate the cross product to determine if the vertex is concave
+        x1, y1 = coords[i - 1]
+        x2, y2 = coords[i]
+        x3, y3 = coords[(i + 1) % len(coords)]
+
+        cross_product = (x2 - x1) * (y3 - y2) - (y2 - y1) * (x3 - x2)
+        return cross_product < 0
+
+    def extend_lines(self, point):
+        x, y = point.x, point.y
+        min_x, min_y, max_x, max_y = self.polygon.bounds
+
+        # Create extended horizontal and vertical lines
+        horizontal_line = LineString([(min_x, y), (max_x, y)])
+        vertical_line = LineString([(x, min_y), (x, max_y)])
+        
+        return horizontal_line, vertical_line
+
     def get_grid_points(self):
-        """
-        Returns the grid points induced by the boundary of the polygon, including the polygon vertices.
-        """
-        # Get the polygon vertices
-        polygon_vertices = MultiPoint(self.polygon.exterior.coords)
+        coords = list(self.polygon.exterior.coords)
+        grid_points = set(coords)
 
-        # Get the horizontal and vertical lines formed by extending the edges of the polygon
-        x_coords = set(coord[0] for coord in self.polygon.exterior.coords)
-        y_coords = set(coord[1] for coord in self.polygon.exterior.coords)
+        # Collect extended lines from concave vertices
+        extended_lines = []
+        for i in range(len(coords) - 1):
+            if self.is_concave_vertex(i, coords):
+                concave_vertex = Point(coords[i])
+                horizontal_line, vertical_line = self.extend_lines(concave_vertex)
+                extended_lines.append(horizontal_line)
+                extended_lines.append(vertical_line)
 
-        vertical_lines = [
-            LineString([(x, min(y_coords)), (x, max(y_coords))]) for x in x_coords
-        ]
-        horizontal_lines = [
-            LineString([(min(x_coords), y), (max(x_coords), y)]) for y in y_coords
-        ]
+        # Find intersection points of extended lines with polygon sides
+        for line in extended_lines:
+            for j in range(len(coords) - 1):
+                polygon_side = LineString([coords[j], coords[j + 1]])
+                intersection = line.intersection(polygon_side)
+                if isinstance(intersection, Point):
+                    grid_points.add((intersection.x, intersection.y))
 
-        # Find the intersection points of the horizontal and vertical lines
-        grid_points = set()
-        for v_line in vertical_lines:
-            for h_line in horizontal_lines:
-                intersection = v_line.intersection(h_line)
-                if intersection.is_empty:
-                    continue
-                elif isinstance(intersection, Point) and intersection.within(
-                    self.polygon
-                ):
-                    grid_points.add(intersection)
-                elif isinstance(intersection, MultiPoint):
-                    for point in intersection:
-                        if point.within(self.polygon):
-                            grid_points.add(point)
+        # Add any remaining intersections of extended lines with each other
+        for i in range(len(extended_lines)):
+            for j in range(i + 1, len(extended_lines)):
+                intersection = extended_lines[i].intersection(extended_lines[j])
+                if isinstance(intersection, Point) and intersection.within(self.polygon):
+                    grid_points.add((intersection.x, intersection.y))
 
-        # Add the polygon vertices to the grid points
-        for point in polygon_vertices.geoms:
-            grid_points.add(point)
-
-        return list(grid_points)
-
+        return [Point(x, y) for x, y in grid_points]
+    
     def find_matching_point(self, candidate: Point):  # -> list[Point]:
         """
         Finds matching points on the grid inside the polygon and kitty-corner to the candidate point
@@ -171,15 +181,15 @@ class RectilinearPolygon:
             difference = edge.difference(self.polygon.boundary)
             if not difference.is_empty:
                 if difference.geom_type == "MultiLineString":
-                    for line in difference.geoms:  # Use .geoms to iterate over MultiLineString
+                    for (
+                        line
+                    ) in difference.geoms:  # Use .geoms to iterate over MultiLineString
                         internal_edges.append(line)
                 else:
                     internal_edges.append(difference)
 
         # Return only the new internal edges that are not part of the polygon boundary
         return internal_edges if internal_edges else None
-
-
 
     def split_polygon(self, lines):
         """
@@ -199,7 +209,13 @@ class RectilinearPolygon:
             for polygon in polygons:
                 split_result = split(polygon, line)
                 if isinstance(split_result, GeometryCollection):
-                    new_polygons.extend([geom for geom in split_result.geoms if isinstance(geom, Polygon)])
+                    new_polygons.extend(
+                        [
+                            geom
+                            for geom in split_result.geoms
+                            if isinstance(geom, Polygon)
+                        ]
+                    )
                 elif isinstance(split_result, (Polygon, MultiPolygon)):
                     if isinstance(split_result, MultiPolygon):
                         new_polygons.extend(list(split_result.geoms))
@@ -312,12 +328,6 @@ class RectilinearPolygon:
         Returns:
             None (just update the best partition).
         """
-        if not candidate_points:
-            # No more candidate points, return the best partition
-            logger.debug(
-                f"No more candidate points, returning the best partition: {self.best_partition}"
-            )
-            return
 
         current_length = sum(line.length for line in partition_list)
 
@@ -347,17 +357,12 @@ class RectilinearPolygon:
                 new_candidate_points = self.find_candidate_points(new_lines)
 
                 # Normalize lines before adding to the set
-                #normalized_new_lines = {normalize_line(line) for line in new_lines}
                 normalized_partition_list = {
                     normalize_line(line) for line in partition_list
                 }
-                new_partition_list = list(
-                    normalized_partition_list.union(new_lines)
-                )
+                new_partition_list = list(normalized_partition_list.union(new_lines))
 
-                # Ensure new_candidate_points are actually new and valid
-                if new_candidate_points:
-                    self.recursive_partition(new_candidate_points, new_partition_list)
+                self.recursive_partition(new_candidate_points, new_partition_list)
 
 
 @staticmethod
@@ -400,10 +405,10 @@ if __name__ == "__main__":
             (8, 5),
         ]
     )
-    polygon3 = Polygon([(0,4), (2,4), (2,0), (5,0), (5,4), (7,4), (7,5), (0,5)])
+    polygon3 = Polygon([(0, 4), (2, 4), (2, 0), (5, 0), (5, 4), (7, 4), (7, 5), (0, 5)])
 
     # Create a RectilinearPolygon instance
-    rectilinear_polygon = RectilinearPolygon(polygon3)
+    rectilinear_polygon = RectilinearPolygon(polygon2)
 
     # Get the partition result
     partition_result = rectilinear_polygon.partition()
@@ -413,7 +418,6 @@ if __name__ == "__main__":
         print("Partition result:", partition_result)
     else:
         print("Partition could not be found.")
-
 
     """
     [(0,4), (2,4), (2,0), (5,0), (5,4), (7,4), (7,5), (0,5)]
