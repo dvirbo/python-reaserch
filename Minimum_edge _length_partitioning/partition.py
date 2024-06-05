@@ -1,12 +1,13 @@
 import logging
-from shapely.ops import split, unary_union
+from shapely.ops import split
 from shapely.geometry import (
     Polygon,
     LineString,
     Point,
     GeometryCollection,
     MultiPolygon,
-    MultiPoint
+    MultiPoint,
+    MultiLineString
 )
 
 logger = logging.getLogger("polygon_partitioning")
@@ -15,7 +16,7 @@ logger = logging.getLogger("polygon_partitioning")
 class RectilinearPolygon:
     def __init__(self, polygon: Polygon):
         self.polygon = polygon
-        self.constructed_lines = []
+        #  self.constructed_lines = []
         self.min_partition_length = float("inf")
         self.best_partition = []
         self.partial_figures = []
@@ -75,8 +76,12 @@ class RectilinearPolygon:
         x_coords = set(coord[0] for coord in self.polygon.exterior.coords)
         y_coords = set(coord[1] for coord in self.polygon.exterior.coords)
 
-        vertical_lines = [LineString([(x, min(y_coords)), (x, max(y_coords))]) for x in x_coords]
-        horizontal_lines = [LineString([(min(x_coords), y), (max(x_coords), y)]) for y in y_coords]
+        vertical_lines = [
+            LineString([(x, min(y_coords)), (x, max(y_coords))]) for x in x_coords
+        ]
+        horizontal_lines = [
+            LineString([(min(x_coords), y), (max(x_coords), y)]) for y in y_coords
+        ]
 
         # Find the intersection points of the horizontal and vertical lines
         grid_points = set()
@@ -85,7 +90,9 @@ class RectilinearPolygon:
                 intersection = v_line.intersection(h_line)
                 if intersection.is_empty:
                     continue
-                elif isinstance(intersection, Point) and intersection.within(self.polygon):
+                elif isinstance(intersection, Point) and intersection.within(
+                    self.polygon
+                ):
                     grid_points.add(intersection)
                 elif isinstance(intersection, MultiPoint):
                     for point in intersection:
@@ -116,8 +123,11 @@ class RectilinearPolygon:
         We want to find the matching points that not in other partial figures (to make a new partial figure)
         """
         for point in self.grid_points:
-            if not any(point.within(polygon) or point.touches(polygon) for polygon in self.partial_figures):
-                relevant_grid_points.append(point) 
+            if not any(
+                point.within(polygon) or point.touches(polygon)
+                for polygon in self.partial_figures
+            ):
+                relevant_grid_points.append(point)
 
         for point in relevant_grid_points:
             if point != candidate:  # Exclude candidate point
@@ -131,13 +141,7 @@ class RectilinearPolygon:
                 )
 
                 if blocked_rect.within(self.polygon):
-                    # Check if the line segment between candidate and point crosses the polygon exterior
-                    segment = LineString([candidate, point])
-                    if not any(
-                        segment.crosses(LineString(self.polygon.exterior))
-                        for line in self.constructed_lines
-                    ):
-                        matching_points.append(point)
+                    matching_points.append(point)
 
         return matching_points
 
@@ -167,46 +171,42 @@ class RectilinearPolygon:
             difference = edge.difference(self.polygon.boundary)
             if not difference.is_empty:
                 if difference.geom_type == "MultiLineString":
-                    for line in difference:
+                    for line in difference.geoms:  # Use .geoms to iterate over MultiLineString
                         internal_edges.append(line)
                 else:
                     internal_edges.append(difference)
-        # return only the new internal edges that are not part of the polygon boundary
+
+        # Return only the new internal edges that are not part of the polygon boundary
         return internal_edges if internal_edges else None
+
+
 
     def split_polygon(self, lines):
         """
         Splits the polygon using the given lines.
-
         Args:
             lines (list[LineString]): A list of LineString objects to split the polygon.
-
         Returns:
             list: List of Polygon objects resulting from the split operation.
         """
         if not lines:
             return [self.polygon]
 
-        def split_geometry(geom, lines):
-            polygons = []
-            if isinstance(geom, Polygon):
-                for line in lines:
-                    split_result = split(geom, line)
-                    if isinstance(split_result, GeometryCollection):
-                        for sub_geom in split_result.geoms:
-                            if isinstance(sub_geom, Polygon):
-                                polygons.append(sub_geom)
-                    elif isinstance(split_result, (Polygon, MultiPolygon)):
-                        if isinstance(split_result, MultiPolygon):
-                            polygons.extend([g for g in split_result.geoms])
-                        else:
-                            polygons.append(split_result)
-            elif isinstance(geom, GeometryCollection):
-                for sub_geom in geom.geoms:
-                    polygons.extend(split_geometry(sub_geom, lines))
-            return polygons
+        polygons = [self.polygon]
 
-        polygons = split_geometry(self.polygon, lines)
+        for line in lines:
+            new_polygons = []
+            for polygon in polygons:
+                split_result = split(polygon, line)
+                if isinstance(split_result, GeometryCollection):
+                    new_polygons.extend([geom for geom in split_result.geoms if isinstance(geom, Polygon)])
+                elif isinstance(split_result, (Polygon, MultiPolygon)):
+                    if isinstance(split_result, MultiPolygon):
+                        new_polygons.extend(list(split_result.geoms))
+                    else:
+                        new_polygons.append(split_result)
+            polygons = new_polygons
+
         return polygons
 
     def find_candidate_points(self, constructed_lines: list[LineString]) -> list[Point]:
@@ -223,6 +223,8 @@ class RectilinearPolygon:
             None
 
         """
+        constructed_lines = [normalize_line(line) for line in constructed_lines]
+
         if len(constructed_lines) == 1:
             return [
                 Point(constructed_lines[0].coords[0]),
@@ -231,12 +233,22 @@ class RectilinearPolygon:
         elif len(constructed_lines) == 2:
             line1 = constructed_lines[0]
             line2 = constructed_lines[1]
-            # common_point = line1.intersection(line2)
-            # if common_point.is_empty:
-            #     # logger.warning("No common point found between the two lines.")
-            #     return []
+            common_point = line1.intersection(line2)
+            if common_point.is_empty:
+                # logger.warning("No common point found between the two lines.")
+                return []
+            else:
+                return [common_point]
         else:
-            return None
+            common_points = []
+            for i in range(len(constructed_lines)):
+                for j in range(i + 1, len(constructed_lines)):
+                    common_point = constructed_lines[i].intersection(
+                        constructed_lines[j]
+                    )
+                    if not common_point.is_empty:
+                        common_points.append(common_point)
+            return common_points
 
     def is_rectangle(self, poly: Polygon) -> bool:
         """
@@ -302,8 +314,10 @@ class RectilinearPolygon:
         """
         if not candidate_points:
             # No more candidate points, return the best partition
-            logger.debug(f"No more candidate points, returning the best partition: {self.best_partition}")
-            return 
+            logger.debug(
+                f"No more candidate points, returning the best partition: {self.best_partition}"
+            )
+            return
 
         current_length = sum(line.length for line in partition_list)
 
@@ -325,16 +339,45 @@ class RectilinearPolygon:
 
             for matching_point in matching_points:
                 new_lines = self.find_blocked_rectangle(candidate, matching_point)
+                if len(partition_list) != 0:
+                    new_lines = check_lines(partition_list, new_lines)
                 if new_lines is None:
                     continue
-
+                # need to find the new candidate point for
                 new_candidate_points = self.find_candidate_points(new_lines)
-                
+
+                # Normalize lines before adding to the set
+                #normalized_new_lines = {normalize_line(line) for line in new_lines}
+                normalized_partition_list = {
+                    normalize_line(line) for line in partition_list
+                }
+                new_partition_list = list(
+                    normalized_partition_list.union(new_lines)
+                )
+
                 # Ensure new_candidate_points are actually new and valid
                 if new_candidate_points:
-                    self.recursive_partition(
-                        new_candidate_points, partition_list + new_lines
-                    )
+                    self.recursive_partition(new_candidate_points, new_partition_list)
+
+
+@staticmethod
+def normalize_line(line: LineString) -> LineString:
+    coords = list(line.coords)
+    if coords[0] > coords[-1]:
+        coords.reverse()
+    return LineString(coords)
+
+
+@staticmethod
+def check_lines(
+    partition_list: list[LineString], new_lines: list[LineString]
+) -> list[LineString]:
+    result = []
+    for new_line in new_lines:
+        if not any(new_line.within(line) for line in partition_list):
+            result.append(new_line)
+    return result
+
 
 if __name__ == "__main__":
     # Create the polygon instance
@@ -357,9 +400,10 @@ if __name__ == "__main__":
             (8, 5),
         ]
     )
+    polygon3 = Polygon([(0,4), (2,4), (2,0), (5,0), (5,4), (7,4), (7,5), (0,5)])
 
     # Create a RectilinearPolygon instance
-    rectilinear_polygon = RectilinearPolygon(polygon2)
+    rectilinear_polygon = RectilinearPolygon(polygon3)
 
     # Get the partition result
     partition_result = rectilinear_polygon.partition()
@@ -369,3 +413,11 @@ if __name__ == "__main__":
         print("Partition result:", partition_result)
     else:
         print("Partition could not be found.")
+
+
+    """
+    [(0,4), (2,4), (2,0), (5,0), (5,4), (7,4), (7,5), (0,5)]
+    
+    
+    
+    """
