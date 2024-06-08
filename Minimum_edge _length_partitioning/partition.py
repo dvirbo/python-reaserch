@@ -242,10 +242,36 @@ class RectilinearPolygon:
             line1 = constructed_lines[0]
             line2 = constructed_lines[1]
             common_point = line1.intersection(line2)
-            if common_point.is_empty:
-                return Point(constructed_lines[0].coords[1])
-            else:
+            if common_point:
                 return Point(common_point)
+        else:
+            return self.find_unsplit_subpolygon_point(constructed_lines)
+            
+    def find_unsplit_subpolygon_point(self, constructed_lines: list[LineString]) -> Point:
+        """
+        Finds the sub-polygon that isn't split into rectangles and returns one of the points
+        of the constructed_lines to continue splitting the rectilinear polygon.
+
+        Args:
+            constructed_lines (list[LineString]): A list of constructed lines.
+
+        Returns:
+            Point: One of the points of the constructed_lines.
+        """
+        polygons = self.split_polygon(constructed_lines)
+
+        for poly in polygons:
+            if not self.is_rectangle(poly):
+                # Find a point from the constructed_lines that is within the non-rectangular sub-polygon
+                for line in constructed_lines:
+                    for point in line.coords:
+                        point_obj = Point(point)
+                        if point_obj.within(poly):
+                            return point_obj
+
+        # If all sub-polygons are rectangles, return None
+        return None
+
 
 
     def is_rectangle(self, poly: Polygon) -> bool:
@@ -299,7 +325,7 @@ class RectilinearPolygon:
         self.iterative_partition(initial_convex_point, [])
 
         return self.best_partition
-
+    
     def iterative_partition(self, candidate_point, partition_list):
         """
         Iteratively partitions the given candidate points and updates the best partition.
@@ -315,15 +341,22 @@ class RectilinearPolygon:
         initial_priority = total_length if total_length != 0 else float("inf")
         pq = []  # Priority queue
         partial_figures = []
-        heapq.heappush(
-            pq,
-            (initial_priority, (tuple(candidate_point.coords[0]), [ComparableLineString(line) for line in partition_list], partial_figures)),
+        initial_item = PriorityQueueItem(
+            initial_priority,
+            tuple(candidate_point.coords[0]),
+            [ComparableLineString(line) for line in partition_list],
+            [Comperablepolygon(figure) for figure in partial_figures],
         )
+        heapq.heappush(pq, initial_item)
 
         # Transform list into a heap
         heapq.heapify(pq)
         while pq:
-            priority, (candidate_point_tuple, partition_list, partial_figures) = heapq.heappop(pq)
+            priority_item = heapq.heappop(pq)
+            candidate_point_tuple = priority_item.candidate_point_tuple
+            partition_list = priority_item.partition_list
+            partial_figures = priority_item.partial_figures
+
             candidate_point = Point(candidate_point_tuple)  # Convert back to Point object
             if candidate_point.is_empty:
                 continue
@@ -337,19 +370,13 @@ class RectilinearPolygon:
                 )
                 if new_lines is None:
                     continue
-                new_figures = partial_figures + [new_partial_figure]
+                new_figures = partial_figures + [Comperablepolygon(new_partial_figure)]
 
-                # Normalize lines and create a set of unique lines
+                # Normalize lines before adding to the set
                 normalized_partition_list = {
                     normalize_line(ComparableLineString(line)) for line in partition_list
                 }
-                normalized_new_lines = {
-                    normalize_line(ComparableLineString(line)) for line in new_lines
-                }
-                unique_lines = normalized_partition_list.union(normalized_new_lines)
-
-                # Convert the set of unique lines back to a list
-                new_partition_list = [ComparableLineString(line.coords) for line in unique_lines]
+                new_partition_list = [ComparableLineString(line) for line in normalized_partition_list.union(new_lines)]
 
                 # Calculate the priority for the new state
                 new_total_length = sum(line.length for line in new_partition_list)
@@ -361,8 +388,8 @@ class RectilinearPolygon:
                         self.best_partition = [line for line in new_partition_list]
                         logger.warning(f"New best partition found: {self.best_partition}")
                     else:
-                        logger.warning(f"Not the best : {new_partition_list}")
-                    continue
+                       # logger.warning(f"Not the best : {new_partition_list}")
+                        continue
 
                 new_candidate_point = self.find_candidate_point(new_partition_list)
                 if new_candidate_point is None or new_candidate_point.is_empty:
@@ -371,17 +398,40 @@ class RectilinearPolygon:
                 # Convert the candidate point to a tuple of coordinates
                 new_candidate_point_tuple = tuple(new_candidate_point.coords[0])
 
-                heapq.heappush(
-                    pq,
-                    (new_priority, (new_candidate_point_tuple, new_partition_list, new_figures)),
+                new_item = PriorityQueueItem(
+                    new_priority,
+                    new_candidate_point_tuple,
+                    new_partition_list,
+                    new_figures,
                 )
-                
+                heapq.heappush(pq, new_item)
+
+class PriorityQueueItem:
+    def __init__(self, priority, candidate_point_tuple, partition_list, partial_figures):
+        self.priority = priority
+        self.candidate_point_tuple = candidate_point_tuple
+        self.partition_list = partition_list
+        self.partial_figures = partial_figures
+
+    def __lt__(self, other):
+        if not isinstance(other, PriorityQueueItem):
+            return NotImplemented
+        return self.priority < other.priority
+
+    def __repr__(self):
+        return f"PriorityQueueItem(priority={self.priority}, candidate_point_tuple={self.candidate_point_tuple}, partition_list={self.partition_list}, partial_figures={self.partial_figures})"              
                 
 class ComparableLineString(LineString):
     def __lt__(self, other):
         if not isinstance(other, ComparableLineString):
             return NotImplemented
         return tuple(self.coords) < tuple(other.coords)
+
+class Comperablepolygon(Polygon):
+    def __lt__(self, other):
+        if not isinstance(other, Comperablepolygon):
+            return NotImplemented
+        return tuple(self.exterior.coords) < tuple(other.exterior.coords)
 
 @staticmethod
 def normalize_line(line: LineString) -> LineString:
@@ -427,7 +477,7 @@ if __name__ == "__main__":
     polygon4 = Polygon([(1, 5), (1, 4), (3, 4), (3, 2), (5, 2), (5, 1), (8, 1), (8, 5)])
 
     # Create a RectilinearPolygon instance
-    rectilinear_polygon = RectilinearPolygon(polygon2)
+    rectilinear_polygon = RectilinearPolygon(polygon4)
 
     # Get the partition result``
     partition_result = rectilinear_polygon.partition()
