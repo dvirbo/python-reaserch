@@ -243,16 +243,10 @@ class RectilinearPolygon:
             line2 = constructed_lines[1]
             common_point = line1.intersection(line2)
             if common_point.is_empty:
-                # logger.warning("No common point found between the two lines.")
-                for i in range(len(constructed_lines)):
-                    for j in range(i + 1, len(constructed_lines)):
-                        common_point = constructed_lines[i].intersection(
-                            constructed_lines[j]
-                        )
-                        if common_point is not None:
-                            return common_point
+                return Point(constructed_lines[0].coords[1])
             else:
-                return common_point
+                return Point(common_point)
+
 
     def is_rectangle(self, poly: Polygon) -> bool:
         """
@@ -294,6 +288,7 @@ class RectilinearPolygon:
             return self.is_rectangle(self.polygon)
         polygons = self.split_polygon(partitions)
         return all(self.is_rectangle(poly) for poly in polygons)
+             
 
     def partition(self):
         if not self.is_rectilinear():
@@ -316,37 +311,20 @@ class RectilinearPolygon:
         Returns:
             None (just update the best partition).
         """
-        
         total_length = sum(line.length for line in partition_list)
         initial_priority = total_length if total_length != 0 else float("inf")
         pq = []  # Priority queue
         partial_figures = []
         heapq.heappush(
             pq,
-            (
-                initial_priority,
-                (tuple(candidate_point.coords[0]), partition_list, partial_figures),
-            ),
+            (initial_priority, (tuple(candidate_point.coords[0]), [ComparableLineString(line) for line in partition_list], partial_figures)),
         )
 
+        # Transform list into a heap
+        heapq.heapify(pq)
         while pq:
-            partial_figures = []
-            priority, (candidate_point_tuple, partition_list, partial_figures) = (
-                heapq.heappop(pq)
-            )
-            current_length = sum(line.length for line in partition_list)
-
-            if self.is_partitioned_into_rectangles(partition_list):
-                if current_length < self.min_partition_length:
-                    self.min_partition_length = current_length
-                    self.best_partition = partition_list
-                    logger.warning(f"New best partition found: {self.best_partition}")
-                logger.warning(f"Not the best : {partition_list}")
-                continue
-
-            candidate_point = Point(
-                candidate_point_tuple
-            )  # Convert back to Point object
+            priority, (candidate_point_tuple, partition_list, partial_figures) = heapq.heappop(pq)
+            candidate_point = Point(candidate_point_tuple)  # Convert back to Point object
             if candidate_point.is_empty:
                 continue
             matching_points = self.find_matching_point(candidate_point, partial_figures)
@@ -357,48 +335,53 @@ class RectilinearPolygon:
                 new_partial_figure, new_lines = self.find_blocked_rectangle(
                     candidate_point, matching_point
                 )
-                if len(new_lines) != 0:
-                    new_lines = check_lines(partition_list, new_lines)
                 if new_lines is None:
                     continue
-                logger.debug(f"new lines are: {new_lines}")
-                partial_figures.append(new_partial_figure)
-                # need to find the new candidate point for
-                new_candidate_point = self.find_candidate_point(new_lines)
-                if new_candidate_point is None or new_candidate_point.is_empty:
-                    continue
+                new_figures = partial_figures + [new_partial_figure]
 
-                # Normalize lines before adding to the set
+                # Normalize lines and create a set of unique lines
                 normalized_partition_list = {
-                    normalize_line(line) for line in partition_list
+                    normalize_line(ComparableLineString(line)) for line in partition_list
                 }
-                new_partition_list = list(normalized_partition_list.union(new_lines))
+                normalized_new_lines = {
+                    normalize_line(ComparableLineString(line)) for line in new_lines
+                }
+                unique_lines = normalized_partition_list.union(normalized_new_lines)
+
+                # Convert the set of unique lines back to a list
+                new_partition_list = [ComparableLineString(line.coords) for line in unique_lines]
 
                 # Calculate the priority for the new state
                 new_total_length = sum(line.length for line in new_partition_list)
-                new_priority = (
-                    new_total_length if new_total_length != 0 else float("inf")
-                )
+                new_priority = new_total_length if new_total_length != 0 else float("inf")
+
+                if self.is_partitioned_into_rectangles(new_partition_list):
+                    if new_total_length < self.min_partition_length:
+                        self.min_partition_length = new_total_length
+                        self.best_partition = [line for line in new_partition_list]
+                        logger.warning(f"New best partition found: {self.best_partition}")
+                    else:
+                        logger.warning(f"Not the best : {new_partition_list}")
+                    continue
+
+                new_candidate_point = self.find_candidate_point(new_partition_list)
+                if new_candidate_point is None or new_candidate_point.is_empty:
+                    continue
 
                 # Convert the candidate point to a tuple of coordinates
-                try:
-                    new_candidate_point_tuple = tuple(new_candidate_point.coords[0])
-                except IndexError:
-                    logger.warning(f"Invalid candidate point: {new_candidate_point}")
-                    continue
+                new_candidate_point_tuple = tuple(new_candidate_point.coords[0])
 
                 heapq.heappush(
                     pq,
-                    (
-                        new_priority,
-                        (
-                            new_candidate_point_tuple,
-                            new_partition_list,
-                            partial_figures,
-                        ),
-                    ),
+                    (new_priority, (new_candidate_point_tuple, new_partition_list, new_figures)),
                 )
-
+                
+                
+class ComparableLineString(LineString):
+    def __lt__(self, other):
+        if not isinstance(other, ComparableLineString):
+            return NotImplemented
+        return tuple(self.coords) < tuple(other.coords)
 
 @staticmethod
 def normalize_line(line: LineString) -> LineString:
