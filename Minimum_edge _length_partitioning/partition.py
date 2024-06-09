@@ -8,6 +8,7 @@ from shapely.geometry import (
     GeometryCollection,
     MultiPolygon,
 )
+from classes import PriorityQueueItem, ComparableLineString, Comperablepolygon
 
 
 logger = logging.getLogger("polygon_partitioning")
@@ -356,10 +357,9 @@ class RectilinearPolygon:
             candidate_point_tuple = priority_item.candidate_point_tuple
             partition_list = priority_item.partition_list
             partial_figures = priority_item.partial_figures
-
-            candidate_point = Point(candidate_point_tuple)  # Convert back to Point object
-            if candidate_point.is_empty:
-                continue
+            
+            # Convert back to Point object
+            candidate_point = Point(candidate_point_tuple)  
             matching_points = self.find_matching_point(candidate_point, partial_figures)
             if not matching_points:
                 continue
@@ -372,15 +372,18 @@ class RectilinearPolygon:
                     continue
                 new_figures = partial_figures + [Comperablepolygon(new_partial_figure)]
 
-                # Normalize lines before adding to the set
+                # Normalize lines before adding to the set to avoid duplication lines
                 normalized_partition_list = {
-                    normalize_line(ComparableLineString(line)) for line in partition_list
+                    normalize_line(ComparableLineString(line)) for line in new_lines
                 }
-                new_partition_list = [ComparableLineString(line) for line in normalized_partition_list.union(new_lines)]
+                new_partition_list = [ComparableLineString(line) for line in normalized_partition_list.union(partition_list)]
 
                 # Calculate the priority for the new state
                 new_total_length = sum(line.length for line in new_partition_list)
                 new_priority = new_total_length if new_total_length != 0 else float("inf")
+                #cutting the search if the new partition is longer than the best partition
+                if new_priority >= self.min_partition_length:
+                    continue
 
                 if self.is_partitioned_into_rectangles(new_partition_list):
                     if new_total_length < self.min_partition_length:
@@ -406,32 +409,7 @@ class RectilinearPolygon:
                 )
                 heapq.heappush(pq, new_item)
 
-class PriorityQueueItem:
-    def __init__(self, priority, candidate_point_tuple, partition_list, partial_figures):
-        self.priority = priority
-        self.candidate_point_tuple = candidate_point_tuple
-        self.partition_list = partition_list
-        self.partial_figures = partial_figures
 
-    def __lt__(self, other):
-        if not isinstance(other, PriorityQueueItem):
-            return NotImplemented
-        return self.priority < other.priority
-
-    def __repr__(self):
-        return f"PriorityQueueItem(priority={self.priority}, candidate_point_tuple={self.candidate_point_tuple}, partition_list={self.partition_list}, partial_figures={self.partial_figures})"              
-                
-class ComparableLineString(LineString):
-    def __lt__(self, other):
-        if not isinstance(other, ComparableLineString):
-            return NotImplemented
-        return tuple(self.coords) < tuple(other.coords)
-
-class Comperablepolygon(Polygon):
-    def __lt__(self, other):
-        if not isinstance(other, Comperablepolygon):
-            return NotImplemented
-        return tuple(self.exterior.coords) < tuple(other.exterior.coords)
 
 @staticmethod
 def normalize_line(line: LineString) -> LineString:
@@ -477,7 +455,7 @@ if __name__ == "__main__":
     polygon4 = Polygon([(1, 5), (1, 4), (3, 4), (3, 2), (5, 2), (5, 1), (8, 1), (8, 5)])
 
     # Create a RectilinearPolygon instance
-    rectilinear_polygon = RectilinearPolygon(polygon4)
+    rectilinear_polygon = RectilinearPolygon(polygon2)
 
     # Get the partition result``
     partition_result = rectilinear_polygon.partition()
